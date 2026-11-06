@@ -1,0 +1,11 @@
+{
+  "codigo_mundo": "sertao_oficial",
+  "nome_sala": "Arena Sertão Oficial",
+  "mqtt_topico": "zb/a/sertao_oficial",
+  "ranking_inicial": [
+    { "nome": "Boi Bandido 👑", "pontuacao": 1850 },
+    { "nome": "Nelore Brabo ⚔️", "pontuacao": 1420 },
+    { "nome": "Caracu Moleza 💤", "pontuacao": 980 },
+    { "nome": "Lenon", "pontuacao": 1980 }
+  ]
+}
