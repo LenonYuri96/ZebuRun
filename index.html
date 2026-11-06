@@ -6,14 +6,15 @@
     <meta name="viewport"
         content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0b0c10">
-    <title>ZebuBattle 🐂 — Arena Global do Sertão</title>
+    <title>ZebuBattle 🐂 — Arena P2P em Tempo Real</title>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="ZebuBattle">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Rubik:wght@500;700;900&display=swap"
         rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.min.js"></script>
+    <!-- WebRTC PeerJS com STUN Ultra-rápido (Substitui o Broker MQTT) -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         :root {
             --sky-1: #1a0b2e;
@@ -742,7 +743,7 @@
                             <div class="top3-row"><span>Carregando...</span></div>
                         </div>
                         <div id="network-badge">
-                            <span id="network-text">📡 Broker: Conectando...</span>
+                            <span id="network-text">⚡ P2P: Conectando...</span>
                             <span id="hud-ping-text">-- ms</span>
                         </div>
                     </div>
@@ -808,7 +809,7 @@
     <div id="modal-start" class="game-modal show">
         <div class="modal-box">
             <h2 class="modal-title">ZEBU BATTLE 🐂</h2>
-            <p class="modal-subtitle">Arena Sertaneja em Tempo Real</p>
+            <p class="modal-subtitle">Arena Sertaneja P2P de Baixa Latência</p>
             <div class="controls-hint-box">
                 <b>🕹️ Controles:</b>
                 <ul>
@@ -819,17 +820,16 @@
             </div>
             <input type="text" id="player-name" class="input-game" placeholder="Apelido do seu Touro" maxlength="12">
             <button class="btn-game btn-primary-game" onclick="entrarNaArena(false)">ENTRAR NA CORRIDA 🏁</button>
-            <button class="btn-game btn-secondary-game" onclick="entrarNaArena(true)">📺 MODO TELÃO
-                (TRANSMISSÃO)</button>
+            <button class="btn-game btn-secondary-game" onclick="entrarNaArena(true)">📺 MODO TELÃO (TRANSMISSÃO)</button>
         </div>
     </div>
 
     <!-- Modal Conectando -->
     <div id="modal-connecting" class="game-modal">
         <div class="modal-box">
-            <h2 class="modal-title">SINCRONIZANDO 🌐</h2>
+            <h2 class="modal-title">CONEXÃO DIRETA ⚡</h2>
             <div class="loading-spinner"></div>
-            <p id="connect-status" class="modal-subtitle">Buscando menor latência...</p>
+            <p id="connect-status" class="modal-subtitle">Estabelecendo túnel P2P...</p>
         </div>
     </div>
 
@@ -883,7 +883,7 @@
         }
 
         /* ==========================================================================
-        2. CONFIGURAÇÕES E ESTADO (SERVERLESS / JSON / CACHE)
+        2. CONFIGURAÇÕES E ESTADO
         ========================================================================== */
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d', { alpha: false });
@@ -908,31 +908,24 @@
         const myPlayerId = 'b_' + Math.random().toString(36).substring(2, 7);
 
         const urlParams = new URLSearchParams(window.location.search);
-        let CODIGO_MUNDO = urlParams.get('mundo') || 'sertao_oficial';
-        let ARENA_TOPIC = 'zb/a/' + CODIGO_MUNDO;
+        let CODIGO_MUNDO = urlParams.get('sala') || urlParams.get('mundo') || 'sertao_oficial';
+        
+        // CONFIGURAÇÃO WEBRTC COM STUN DO BRASIL (GOOGLE + CLOUDFLARE)
+        const PEER_CONFIG = {
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun.cloudflare.com:3478' }
+                ],
+                sdpSemantics: 'unified-plan'
+            }
+        };
 
-        const isHttps = (window.location.protocol === 'https:');
-        const MQTT_SERVERS = [
-            { host: 'broker.emqx.io', port: isHttps ? 8084 : 8083, path: '/mqtt', useSSL: isHttps },
-            { host: 'broker.hivemq.com', port: isHttps ? 8884 : 8000, path: '/mqtt', useSSL: isHttps },
-            { host: 'test.mosquitto.org', port: isHttps ? 8081 : 8080, path: '/mqtt', useSSL: isHttps }
-        ];
-        let currentServerIndex = 0;
-        let pahoClient = null, isMaster = false, lastMasterHeartbeat = Date.now(), isConnecting = false;
-
-        function criarClientePaho(host, port, path, clientId) {
-            if (typeof Paho === 'undefined') return null;
-            if (typeof Paho.Client === 'function') return new Paho.Client(host, Number(port), path, clientId);
-            if (Paho.MQTT && typeof Paho.MQTT.Client === 'function') return new Paho.MQTT.Client(host, Number(port), path, clientId);
-            return null;
-        }
-
-        function criarMensagemPaho(payloadString) {
-            if (typeof Paho === 'undefined') return null;
-            if (typeof Paho.Message === 'function') return new Paho.Message(payloadString);
-            if (Paho.MQTT && typeof Paho.MQTT.Message === 'function') return new Paho.MQTT.Message(payloadString);
-            return null;
-        }
+        let peerInstance = null;
+        let hostConnection = null;
+        const clientConnections = {}; // Se for Host, armazena conexões de todos os celulares
+        let isMaster = false, lastMasterHeartbeat = Date.now();
 
         /* ==========================================================================
         3. CORES & ÁUDIO
@@ -995,7 +988,7 @@
         document.addEventListener('touchstart', unlockAudio, { passive: true });
 
         /* ==========================================================================
-        4. BOTS COMPETIDORES (IA LOCAL)
+        4. BOTS COMPETIDORES (IA LOCAL DO TELÃO)
         ========================================================================== */
         class BotCompetidor {
             constructor(id, name, level, paletaIdx, startX) {
@@ -1130,37 +1123,31 @@
         ];
 
         /* ==========================================================================
-        5. COMUNICAÇÃO MULTIPLAYER & CARREGAMENTO DE JSON
+        5. REDE P2P WEBRTC (PEERJS) — LATÊNCIA ULTRA-BAIXA
         ========================================================================== */
         async function carregarMundoConfig() {
-            const paramMundo = urlParams.get('mundo');
-            if (paramMundo) {
-                CODIGO_MUNDO = paramMundo;
-                ARENA_TOPIC = 'zb/a/' + CODIGO_MUNDO;
-                return;
-            }
-
             try {
                 const resp = await fetch('config.json', { cache: 'no-store' });
                 if (resp.ok) {
                     const data = await resp.json();
-                    if (data.codigo_mundo) {
+                    if (data.codigo_mundo && !urlParams.get('sala')) {
                         CODIGO_MUNDO = data.codigo_mundo;
-                        ARENA_TOPIC = data.mqtt_topico || ('zb/a/' + CODIGO_MUNDO);
                     }
                     if (Array.isArray(data.ranking_inicial) && !localStorage.getItem('zb_ranking_cache')) {
                         bancoTop3 = data.ranking_inicial;
                     }
                 }
-            } catch (e) {
-                console.log("Usando configuração padrão local.");
-            }
+            } catch (e) { }
         }
 
         function medirPing() {
-            if (!pahoClient || !pahoClient.isConnected()) return;
-            ultimoPingEnviado = performance.now();
-            publicarMensagem({ t: 'ping', id: myPlayerId, ts: Math.round(ultimoPingEnviado) });
+            if (isMaster) {
+                // Telão/Host é a referência local: Ping zero!
+                atualizarDisplayPing(1);
+            } else if (hostConnection && hostConnection.open) {
+                ultimoPingEnviado = performance.now();
+                hostConnection.send({ t: 'ping', id: myPlayerId, ts: Math.round(ultimoPingEnviado) });
+            }
         }
 
         function atualizarDisplayPing(ms) {
@@ -1174,157 +1161,173 @@
             if (hudPingText) hudPingText.innerText = txt;
 
             let cor = '#10b981';
-            if (ms > 120 && ms <= 240) cor = '#f59e0b';
-            else if (ms > 240) cor = '#ef4444';
+            if (ms > 80 && ms <= 160) cor = '#f59e0b';
+            else if (ms > 160) cor = '#ef4444';
 
             if (dot) dot.style.background = cor;
             if (mobilePingVal) mobilePingVal.style.color = cor;
         }
 
-        function conectarBroker() {
-            if (isConnecting || (pahoClient && pahoClient.isConnected())) return;
+        function iniciarRedeP2P() {
+            atualizarBadgeRede('P2P Conectando...');
+            const roomHostId = 'zb_room_' + CODIGO_MUNDO;
 
-            if (typeof Paho === 'undefined' || (!Paho.Client && (!Paho.MQTT || !Paho.MQTT.Client))) {
-                setTimeout(conectarBroker, 250);
-                return;
-            }
+            if (isSpectator) {
+                // MODO TELÃO: Atua como Host Master da sala
+                isMaster = true;
+                peerInstance = new Peer(roomHostId, PEER_CONFIG);
 
-            isConnecting = true;
-            const currentServer = MQTT_SERVERS[currentServerIndex];
-            atualizarBadgeRede(`Conectando...`);
+                peerInstance.on('open', (id) => {
+                    atualizarBadgeRede('Telão Online (Host)');
+                    atualizarDisplayPing(1);
+                    document.getElementById('modal-connecting').classList.remove('show');
+                    if (!jogoAtivo) iniciarJogoLocal();
 
-            try {
-                const clientId = 'zb_' + Math.random().toString(36).substring(2, 8);
-                pahoClient = criarClientePaho(currentServer.host, currentServer.port, currentServer.path, clientId);
+                    // Loop de broadcast para os celulares (30x por segundo = fluidez máxima)
+                    setInterval(() => {
+                        if (!jogoAtivo) return;
 
-                if (!pahoClient) {
-                    isConnecting = false;
-                    setTimeout(conectarBroker, 1000);
-                    return;
-                }
+                        const botsData = botsArena.map(b => ({
+                            id: b.id, n: b.name, x: Math.round(b.x), y: Math.round(b.y),
+                            vy: Math.round(b.vy * 10) / 10, s: b.score, v: b.vivo ? 1 : 0,
+                            tr: b.tropecando ? 1 : 0, inv: b.invulneravel ? 1 : 0, ch: b.temChapeu ? 1 : 0,
+                            tb: Math.round(b.tempoTurbo), pal: b.paletaIndex
+                        }));
 
-                pahoClient.onConnectionLost = () => {
-                    isConnecting = false;
-                    atualizarBadgeRede('Reconectando...');
-                    currentServerIndex = (currentServerIndex + 1) % MQTT_SERVERS.length;
-                    setTimeout(conectarBroker, 1800);
-                };
-
-                pahoClient.onMessageArrived = (msg) => {
-                    try {
-                        processarMensagemArena(JSON.parse(msg.payloadString));
-                    } catch (e) { }
-                };
-
-                pahoClient.connect({
-                    useSSL: currentServer.useSSL,
-                    timeout: 4,
-                    keepAliveInterval: 25,
-                    cleanSession: true,
-                    onSuccess: () => {
-                        isConnecting = false;
-                        atualizarBadgeRede(`Online (${currentServer.host.split('.')[0]})`);
-                        pahoClient.subscribe(ARENA_TOPIC, { qos: 0 });
-
-                        document.getElementById('modal-connecting').classList.remove('show');
-                        if (!jogoAtivo) iniciarJogoLocal();
-
-                        publicarMensagem({
-                            t: 'join',
-                            id: myPlayerId,
-                            n: playerName,
-                            spec: isSpectator,
-                            pal: meuBoi ? meuBoi.paletaIndex : 0
+                        broadcastMensagem({
+                            t: 'wsync',
+                            d: Math.round(worldDistance),
+                            v: velocidade,
+                            nv: nivelVelocidade,
+                            ts: Date.now(),
+                            b: botsData,
+                            top: bancoTop3
                         });
+                    }, 45);
 
-                        setInterval(medirPing, 2500);
-                        medirPing();
+                    setInterval(() => {
+                        if (!jogoAtivo) return;
+                        broadcastMensagem({
+                            t: 'wstate',
+                            d: Math.round(worldDistance),
+                            v: velocidade,
+                            ts: Date.now(),
+                            obs: obstaculos.filter(o => (o.worldX - worldDistance) > -100 && (o.worldX - worldDistance) < W + 1000).map(o => ({ oid: o.oid, tipo: o.tipo, worldX: o.worldX, y: o.y, w: o.w, h: o.h })),
+                            pw: powerups.filter(p => (p.worldX - worldDistance) > -100 && (p.worldX - worldDistance) < W + 1000).map(p => ({ pid: p.pid, tipo: p.tipo, worldX: p.worldX, y: p.y, w: p.w, h: p.h }))
+                        });
+                    }, 1200);
+                });
 
-                        setInterval(() => {
-                            if (!jogoAtivo) return;
+                peerInstance.on('connection', (conn) => {
+                    clientConnections[conn.peer] = conn;
 
-                            if (meuBoi && meuBoi.vivo) {
-                                publicarMensagem({
-                                    t: 'pos',
-                                    id: myPlayerId,
-                                    n: playerName,
-                                    x: Math.round(meuBoi.x),
-                                    y: Math.round(meuBoi.y),
-                                    vy: Math.round(meuBoi.vy * 10) / 10,
-                                    s: meuBoi.score,
-                                    v: meuBoi.vivo ? 1 : 0,
-                                    tr: meuBoi.tropecando ? 1 : 0,
-                                    inv: meuBoi.invulneravel ? 1 : 0,
-                                    ch: meuBoi.temChapeu ? 1 : 0,
-                                    tb: Math.round(meuBoi.tempoTurbo),
-                                    pal: meuBoi.paletaIndex
-                                });
-                            }
+                    conn.on('data', (data) => {
+                        processarMensagemArena(data);
+                        // Telão repassa as posições de um jogador para todos os outros
+                        if (data.t === 'pos' || data.t === 's' || data.t === 'd' || data.t === 'pwp' || data.t === 'obsd') {
+                            broadcastMensagem(data, conn.peer);
+                        }
+                    });
 
-                            if (isMaster) {
-                                const botsData = botsArena.map(b => ({
-                                    id: b.id, n: b.name, x: Math.round(b.x), y: Math.round(b.y),
-                                    vy: Math.round(b.vy * 10) / 10, s: b.score, v: b.vivo ? 1 : 0,
-                                    tr: b.tropecando ? 1 : 0, inv: b.invulneravel ? 1 : 0, ch: b.temChapeu ? 1 : 0,
-                                    tb: Math.round(b.tempoTurbo), pal: b.paletaIndex
-                                }));
+                    conn.on('close', () => {
+                        delete clientConnections[conn.peer];
+                    });
+                });
 
-                                publicarMensagem({
-                                    t: 'wsync',
-                                    id: myPlayerId,
-                                    spec: isSpectator,
-                                    d: Math.round(worldDistance),
-                                    v: velocidade,
-                                    nv: nivelVelocidade,
-                                    ts: Date.now(),
-                                    b: botsData,
-                                    top: bancoTop3
-                                });
-                            }
-                        }, 95);
-
-                        setInterval(() => {
-                            if (!jogoAtivo || !isMaster) return;
-                            publicarMensagem({
-                                t: 'wstate',
-                                id: myPlayerId,
-                                d: Math.round(worldDistance),
-                                v: velocidade,
-                                ts: Date.now(),
-                                obs: obstaculos.filter(o => (o.worldX - worldDistance) > -100 && (o.worldX - worldDistance) < W + 1000).map(o => ({ oid: o.oid, tipo: o.tipo, worldX: o.worldX, y: o.y, w: o.w, h: o.h })),
-                                pw: powerups.filter(p => (p.worldX - worldDistance) > -100 && (p.worldX - worldDistance) < W + 1000).map(p => ({ pid: p.pid, tipo: p.tipo, worldX: p.worldX, y: p.y, w: p.w, h: p.h }))
-                            });
-                        }, 1500);
-                    },
-                    onFailure: () => {
-                        isConnecting = false;
-                        currentServerIndex = (currentServerIndex + 1) % MQTT_SERVERS.length;
-                        atualizarBadgeRede('Alternando servidor...');
-                        document.getElementById('modal-connecting').classList.remove('show');
-                        if (!jogoAtivo) iniciarJogoLocal();
-                        setTimeout(conectarBroker, 1500);
+                peerInstance.on('error', (err) => {
+                    console.error('PeerJS Telão:', err);
+                    if (err.type === 'unavailable-id') {
+                        // Se o Telão já estiver aberto em outra aba
+                        atualizarBadgeRede('Telão já aberto');
                     }
                 });
-            } catch (e) {
-                isConnecting = false;
-                currentServerIndex = (currentServerIndex + 1) % MQTT_SERVERS.length;
-                document.getElementById('modal-connecting').classList.remove('show');
-                if (!jogoAtivo) iniciarJogoLocal();
-                setTimeout(conectarBroker, 1500);
+
+            } else {
+                // MODO JOGADOR (CELULAR OU CLIENTE)
+                isMaster = false;
+                peerInstance = new Peer(null, PEER_CONFIG);
+
+                peerInstance.on('open', () => {
+                    atualizarBadgeRede('Conectando ao Telão...');
+                    conectarAoTelao(roomHostId);
+                });
+
+                peerInstance.on('error', (err) => {
+                    console.error('PeerJS Cliente:', err);
+                    setTimeout(() => conectarAoTelao(roomHostId), 2000);
+                });
             }
         }
 
+        function conectarAoTelao(hostId) {
+            hostConnection = peerInstance.connect(hostId, { reliable: false });
+
+            hostConnection.on('open', () => {
+                atualizarBadgeRede('P2P Direto ⚡');
+                document.getElementById('modal-connecting').classList.remove('show');
+                if (!jogoAtivo) iniciarJogoLocal();
+
+                publicarMensagem({
+                    t: 'join',
+                    id: myPlayerId,
+                    n: playerName,
+                    spec: false,
+                    pal: meuBoi ? meuBoi.paletaIndex : 0
+                });
+
+                // Monitoramento contínuo de ping real
+                setInterval(medirPing, 1500);
+                medirPing();
+
+                // Envio de posição para o Telão
+                setInterval(() => {
+                    if (!jogoAtivo || !meuBoi || !meuBoi.vivo) return;
+                    publicarMensagem({
+                        t: 'pos',
+                        id: myPlayerId,
+                        n: playerName,
+                        x: Math.round(meuBoi.x),
+                        y: Math.round(meuBoi.y),
+                        vy: Math.round(meuBoi.vy * 10) / 10,
+                        s: meuBoi.score,
+                        v: meuBoi.vivo ? 1 : 0,
+                        tr: meuBoi.tropecando ? 1 : 0,
+                        inv: meuBoi.invulneravel ? 1 : 0,
+                        ch: meuBoi.temChapeu ? 1 : 0,
+                        tb: Math.round(meuBoi.tempoTurbo),
+                        pal: meuBoi.paletaIndex
+                    });
+                }, 40);
+            });
+
+            hostConnection.on('data', (data) => {
+                processarMensagemArena(data);
+            });
+
+            hostConnection.on('close', () => {
+                atualizarBadgeRede('Telão desconectou');
+                setTimeout(() => conectarAoTelao(hostId), 2500);
+            });
+        }
+
         function publicarMensagem(obj) {
-            if (pahoClient && pahoClient.isConnected()) {
-                try {
-                    const m = criarMensagemPaho(JSON.stringify(obj));
-                    if (m) {
-                        m.destinationName = ARENA_TOPIC;
-                        m.qos = 0;
-                        pahoClient.send(m);
-                    }
-                } catch (e) { }
+            if (isMaster) {
+                // Telão processa localmente e envia para todos
+                broadcastMensagem(obj);
+            } else if (hostConnection && hostConnection.open) {
+                try { hostConnection.send(obj); } catch (e) { }
             }
+        }
+
+        function broadcastMensagem(obj, excetoPeerId = null) {
+            Object.keys(clientConnections).forEach(peerId => {
+                if (peerId !== excetoPeerId) {
+                    const c = clientConnections[peerId];
+                    if (c && c.open) {
+                        try { c.send(obj); } catch (e) { }
+                    }
+                }
+            });
         }
 
         function contarJogadoresVivos() {
@@ -1332,46 +1335,29 @@
             return remotos + ((meuBoi && meuBoi.vivo) ? 1 : 0);
         }
 
-        function verificarMaster() {
-            const agora = Date.now();
-            for (const id in peersTable) {
-                if (agora - peersTable[id].lastSeen > 3500) delete peersTable[id];
-            }
-            const todos = Object.values(peersTable);
-            todos.push({ id: myPlayerId, spec: isSpectator, lastSeen: agora });
-
-            const telaoList = todos.filter(p => p.spec).map(p => p.id).sort();
-            const masterEleito = telaoList.length > 0 ? telaoList[0] : todos.map(p => p.id).sort()[0];
-
-            if (masterEleito === myPlayerId) {
-                isMaster = true;
-                publicarMensagem({ t: 'mping', id: myPlayerId, spec: isSpectator });
-            } else {
-                isMaster = false;
-            }
-        }
-
         function processarMensagemArena(data) {
             if (!data) return;
 
-            if (data.t === 'ping' && data.id === myPlayerId) {
-                const rtt = Math.max(1, Math.round(performance.now() - ultimoPingEnviado));
+            // Resposta de Ping (Calcula RTT)
+            if (data.t === 'ping') {
+                if (isMaster && clientConnections[data.id]) {
+                    clientConnections[data.id].send({ t: 'pong', ts: data.ts });
+                }
+                return;
+            } else if (data.t === 'pong') {
+                const rtt = Math.max(1, Math.round(performance.now() - data.ts));
                 atualizarDisplayPing(rtt);
                 return;
             }
 
-            const senderId = data.id || data.masterId;
-            if (!senderId || senderId === myPlayerId) return;
-
-            peersTable[senderId] = { id: senderId, spec: !!data.spec, lastSeen: Date.now() };
+            const senderId = data.id;
+            if (senderId === myPlayerId) return;
 
             if (data.t === 'join') {
-                if (!data.spec) {
-                    if (!playersMap[data.id]) {
-                        playersMap[data.id] = new PlayerBoi(data.id, data.n, false, data.pal);
-                        adicionarKillFeed(`✨ <b>${data.n}</b> entrou na arena!`);
-                        Audio8Bit.moo();
-                    }
+                if (!playersMap[data.id]) {
+                    playersMap[data.id] = new PlayerBoi(data.id, data.n, false, data.pal);
+                    adicionarKillFeed(`✨ <b>${data.n}</b> entrou na arena!`);
+                    Audio8Bit.moo();
                 }
             } else if (data.t === 'pos') {
                 let p = playersMap[data.id];
@@ -1427,8 +1413,6 @@
                 velocidade = data.v;
                 (data.obs || []).forEach(o => { if (!recentlyDestroyed[o.oid] && !obstaculos.find(x => x.oid === o.oid)) obstaculos.push(o); });
                 (data.pw || []).forEach(p => { if (!recentlyDestroyed[p.pid] && !powerups.find(x => x.pid === p.pid)) powerups.push(p); });
-            } else if (data.t === 'mping') {
-                lastMasterHeartbeat = Date.now();
             } else if (data.t === 's') {
                 if (meuBoi && data.al === meuBoi.id) meuBoi.levarSoco();
                 else if (playersMap[data.al]) playersMap[data.al].levarSoco();
@@ -1463,7 +1447,6 @@
                 adicionarKillFeed(`🥩 <b>${data.n}</b> virou churrasco!`);
             } else if (data.t === 'leave') {
                 if (playersMap[data.id]) delete playersMap[data.id];
-                if (peersTable[data.id]) delete peersTable[data.id];
             }
         }
 
@@ -1476,7 +1459,7 @@
 
         function atualizarBadgeRede(txt) {
             const el = document.getElementById('network-text');
-            if (el) el.innerText = `📡 ${txt}`;
+            if (el) el.innerText = `⚡ ${txt}`;
         }
 
         function gerenciarVelocidadeBatalha() {
@@ -1864,7 +1847,7 @@
         function seEffectsLimit() { if (efeitos.length > 5) efeitos.shift(); }
 
         /* ==========================================================================
-        9. RANKING 100% CLIENT-SIDE & SINCRONIZAÇÃO EM CACHE
+        9. RANKING EM MEMÓRIA & CACHE
         ========================================================================== */
         let bancoTop3 = [
             { nome: 'Boi Bandido 👑', pontuacao: 1850 },
@@ -2015,7 +1998,7 @@
                 if (targetWorldDistance > 0 && timeSinceSync < 2000) {
                     const diff = targetWorldDistance - worldDistance;
                     if (Math.abs(diff) > 100) worldDistance = targetWorldDistance;
-                    else if (Math.abs(diff) > 0.5) worldDistance += diff * 0.12;
+                    else if (Math.abs(diff) > 0.5) worldDistance += diff * 0.15;
                 }
             }
 
@@ -2028,7 +2011,7 @@
             gerenciarSpawnsMundiais();
             gerenciarVelocidadeBatalha();
 
-            if (frame % 20 === 0) {
+            if (frame % 15 === 0) {
                 atualizarRankingAoVivo();
             }
 
@@ -2156,7 +2139,6 @@
             document.getElementById('death-score').innerText = scoreFinal;
             document.getElementById('modal-death').classList.add('show');
 
-            // Salva no cache local e propaga via MQTT para todos da sala
             registrarPontuacaoMemoria(playerName, scoreFinal, true);
             touchState.left = false; touchState.right = false;
         }
@@ -2240,7 +2222,7 @@
         }
 
         /* ==========================================================================
-        12. INICIALIZAÇÃO
+        12. INICIALIZAÇÃO E RESPONSIVIDADE
         ========================================================================== */
         async function entrarNaArena(spectator) {
             isSpectator = spectator;
@@ -2249,6 +2231,7 @@
 
             document.body.classList.toggle('is-spectator', spectator);
             document.getElementById('modal-start').classList.remove('show');
+            document.getElementById('modal-connecting').classList.add('show');
             Audio8Bit.init();
 
             await carregarMundoConfig();
@@ -2257,15 +2240,14 @@
                 const qrBox = document.getElementById('telao-qrcode-box');
                 const qrImg = document.getElementById('qr-image');
                 const urlObj = new URL(window.location.href);
-                urlObj.search = `?mundo=${encodeURIComponent(CODIGO_MUNDO)}&play=1`;
+                urlObj.search = `?sala=${encodeURIComponent(CODIGO_MUNDO)}&play=1`;
                 qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&margin=4&data=${encodeURIComponent(urlObj.toString())}`;
                 qrBox.classList.add('show');
                 document.getElementById('score-label-txt').innerText = "MODO";
                 document.getElementById('score-live').innerText = "TELÃO";
             }
 
-            iniciarJogoLocal();
-            conectarBroker();
+            iniciarRedeP2P();
         }
 
         function iniciarJogoLocal() {
@@ -2286,7 +2268,6 @@
             lastFrameTime = performance.now();
             jogoAtivo = true;
             requestAnimationFrame(gameLoop);
-            setInterval(() => { if (jogoAtivo) verificarMaster(); }, 600);
         }
 
         function fitCanvas() {
@@ -2313,10 +2294,10 @@
             playerName = 'Boi_' + Math.floor(Math.random() * 900 + 100);
             isSpectator = false;
             document.getElementById('modal-start').classList.remove('show');
+            document.getElementById('modal-connecting').classList.add('show');
             Audio8Bit.init();
             carregarMundoConfig().then(() => {
-                iniciarJogoLocal();
-                conectarBroker();
+                iniciarRedeP2P();
             });
         }
 
